@@ -1,0 +1,244 @@
+### =====================================================================
+### Pruebas manuales de JwtAuth (cliente HTTP de Rider)
+###
+### Uso: arranca la app (perfil "http", puerto 5109), elige el entorno "dev"
+### arriba a la derecha y ejecuta las peticiones EN ORDEN (botón verde de cada una).
+### Los tokens se guardan solos en variables ({{accessToken}}, {{refreshToken}}...).
+###
+### Para la parte de Admin hace falta promover un usuario por SQL (ver sección 5).
+### =====================================================================
+
+
+### ---------- 1. REGISTRO Y LOGIN (rutas públicas, sin token) ----------
+
+### 1.1 Registrar a "ana" -> 201, rol "User"
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{ "name": "ana", "password": "Clave12345" }
+
+> {%
+    client.test("registro correcto", () => client.assert(response.status === 201));
+%}
+
+### 1.2 Registrar a "ana" otra vez -> 409
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{ "name": "ana", "password": "Clave12345" }
+
+> {%
+    client.test("nombre duplicado", () => client.assert(response.status === 409));
+%}
+
+### 1.3 Contraseña demasiado corta -> 400
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{ "name": "bob", "password": "123" }
+
+> {%
+    client.test("validación del DTO", () => client.assert(response.status === 400));
+%}
+
+### 1.4 Login con contraseña incorrecta -> 401
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "name": "ana", "password": "incorrecta" }
+
+> {%
+    client.test("credenciales inválidas", () => client.assert(response.status === 401));
+%}
+
+### 1.5 Login correcto -> 200. Guarda los dos tokens en variables.
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "name": "ana", "password": "Clave12345" }
+
+> {%
+    client.test("login correcto", () => client.assert(response.status === 200));
+    client.global.set("accessToken", response.body.accessToken);
+    client.global.set("refreshToken", response.body.refreshToken);
+%}
+
+
+### ---------- 2. AUTENTICACIÓN (¿hay un token válido?) ----------
+
+### 2.1 /me sin token -> 401
+GET {{host}}/me
+
+> {%
+    client.test("sin token", () => client.assert(response.status === 401));
+%}
+
+### 2.2 /me con token inválido -> 401
+GET {{host}}/me
+Authorization: Bearer abc.def.ghi
+
+> {%
+    client.test("token basura", () => client.assert(response.status === 401));
+%}
+
+### 2.3 /me con token válido -> 200
+GET {{host}}/me
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.test("token válido", () => client.assert(response.status === 200));
+    client.test("el rol viene del token", () => client.assert(response.body.role === "User"));
+%}
+
+
+### ---------- 3. AUTORIZACIÓN con un usuario normal (rol User) ----------
+
+### 3.1 Listar todos los usuarios (solo Admin) -> 403
+GET {{host}}/users
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.test("User no puede listar", () => client.assert(response.status === 403));
+%}
+
+### 3.2 Ver MI propio usuario (id 1, si es el primero) -> 200
+GET {{host}}/users/1
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.test("el dueño puede verse", () => client.assert(response.status === 200));
+%}
+
+### 3.3 Ver el usuario de otro (id 2) -> 403 (o 404 si aún no existe nadie con ese id; ver 5.1)
+GET {{host}}/users/2
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.test("no puede ver a otros", () => client.assert(response.status === 403));
+%}
+
+
+### ---------- 4. REFRESH TOKENS ----------
+
+### 4.1 Renovar: canjea el refresh token y recibe un par NUEVO (rotación).
+### Guarda el token viejo en "oldRefreshToken" para probar la reutilización en 4.3.
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+> {%
+    client.test("refresh correcto", () => client.assert(response.status === 200));
+    client.global.set("oldRefreshToken", client.global.get("refreshToken"));
+    client.global.set("accessToken", response.body.accessToken);
+    client.global.set("refreshToken", response.body.refreshToken);
+%}
+
+### 4.2 El access token nuevo funciona -> 200
+GET {{host}}/me
+Authorization: Bearer {{accessToken}}
+
+> {%
+    client.test("access token renovado", () => client.assert(response.status === 200));
+%}
+
+### 4.3 REUTILIZACIÓN: enviar el refresh token ya canjeado -> 401
+### ...y el servidor revoca TODOS los tokens de ana (sospecha de robo).
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{oldRefreshToken}}" }
+
+> {%
+    client.test("reutilización detectada", () => client.assert(response.status === 401));
+%}
+
+### 4.4 Consecuencia: ni siquiera el token "nuevo" sirve ya -> 401
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+> {%
+    client.test("cadena revocada", () => client.assert(response.status === 401));
+%}
+
+### 4.5 Volver a iniciar sesión (para probar el logout)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "name": "ana", "password": "Clave12345" }
+
+> {%
+    client.global.set("accessToken", response.body.accessToken);
+    client.global.set("refreshToken", response.body.refreshToken);
+%}
+
+### 4.6 Logout: revoca el refresh token -> 204
+POST {{host}}/auth/logout
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+> {%
+    client.test("logout", () => client.assert(response.status === 204));
+%}
+
+### 4.7 Tras el logout el refresh token ya no sirve -> 401
+POST {{host}}/auth/refresh
+Content-Type: application/json
+
+{ "refreshToken": "{{refreshToken}}" }
+
+> {%
+    client.test("refresh tras logout", () => client.assert(response.status === 401));
+%}
+
+
+### ---------- 5. ADMIN ----------
+### El registro público SIEMPRE crea rol "User" (el cliente no elige su rol).
+### Para tener un Admin: registrar "root" (5.1) y promoverlo por SQL desde la terminal:
+###
+###   sqlite3 jwtauth.db "UPDATE User SET RoleId=(SELECT Id FROM Role WHERE Description='Admin') WHERE Name='root';"
+###
+### Después ejecuta 5.2 (login) y el resto.
+
+### 5.1 Registrar a "root" (será el usuario 2)
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{ "name": "root", "password": "Clave12345" }
+
+### 5.2 Login como root (DESPUÉS de promoverlo por SQL: el rol se copia al token al hacer login)
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{ "name": "root", "password": "Clave12345" }
+
+> {%
+    client.global.set("adminToken", response.body.accessToken);
+%}
+
+### 5.3 Admin lista todos los usuarios -> 200
+GET {{host}}/users
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Admin lista", () => client.assert(response.status === 200));
+%}
+
+### 5.4 Admin ve a cualquier usuario (id 1) -> 200
+GET {{host}}/users/1
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("Admin ve a otros", () => client.assert(response.status === 200));
+%}
+
+### 5.5 Usuario inexistente -> 404
+GET {{host}}/users/999
+Authorization: Bearer {{adminToken}}
+
+> {%
+    client.test("no existe", () => client.assert(response.status === 404));
+%}
